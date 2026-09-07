@@ -1,27 +1,196 @@
-# AGENTS.md
+#AGENTS.md
 
-Guidance for the archived Malachite repository. Active development moved, with history, to `ewanc26/pkgs`: the CLI is `packages/malachite/`, the web app is `packages/malachite-web/`, and TID support is `packages/tid/`. Unless the user explicitly asks for an archival or security repair here, make the change in that monorepo instead.
+Guidance for AI coding agents working in this repository. Human contributors
+may find it useful too, but the audience is agents.
 
-## Historical layout
+## Project overview
 
-- `src/index.ts` enters the Node CLI through `src/lib/cli.ts`. Environment-neutral import, CAR sync, merge, publishing, rate-limit, CSV, Spotify, and TID logic lives mainly in `src/core/`; `src/lib/` adds terminal-facing orchestration.
-- `src/tests/` is compiled with the application and run from `dist/tests/` using Node's test runner. CLI state and encrypted app-password storage are managed under the platform-specific Malachite state directory by `src/utils/`.
-- `web/` is a separate SvelteKit 2/Svelte 5 browser importer using AT Protocol OAuth. It mirrors and aliases core code, performs file parsing and repository writes in the browser, and has its own package metadata and lockfile.
-- `packages/tid/` is the historical zero-runtime-dependency TID package. `lexicons/fm.teal.alpha/` describes the play, actor, and stats contracts; it is protocol surface, not incidental JSON.
-- `scripts/rate-limit-monitor.js` is an operational helper. Root `package.json`, `src/config.ts`, and web metadata contain separately maintained version/client strings; keep them aligned if an explicitly requested release repair touches them.
+A native C/C++23 Minecraft: Java Edition server focused on predictable, low RAM
+usage. Zincfox is an experimental clean-room server implementation: the goal is
+not to clone the vanilla server architecture in C++, but to build the protocol,
+simulation, world and persistence layers around explicit ownership, bounded
+queues and measurable memory budgets from the start.
 
-## Safety and compatibility
+- **Language:** C17 is available for small leaf components where it reduces
+  runtime/dependency surface; C++23 is the default for protocol, server,
+  storage, and world state. `snake_case` for functions and variables,
+  `PascalCase` for types.
+- **Build:** CMake, C17/C++23 strict by target, `-Wall -Wextra -Wpedantic
+  -Wconversion -Wsign-conversion`. Tests are per-file executables run through `ctest`,
+  following the account's other native repos (`clay/`, `wolfram/`, `keepsake/`).
+- **Target:** macOS and Linux desktop. Windows is untested (as elsewhere in this
+  account).
 
-- Imports write `fm.teal.alpha.feed.play` records, and deduplication can delete records. Dry-run must cover every create and delete path, cancellation must stop subsequent writes, and retry/fallback logic must not turn a partial failure into duplicate publication.
-- Preserve record-key/TID compatibility, timestamp ordering, Last.fm and Spotify normalization, and the exact deduplication key. The in-memory existing-record cache is per DID; force-refresh and session changes must not reuse another account's state.
-- CAR export is the preferred existing-record check. Its fallback intentionally proceeds to `applyWrites`, where already-existing rkeys may fail while new records land; report partial outcomes honestly and retain rate-limit headroom.
-- The CLI can persist an encrypted app password and import progress locally. Never log credentials/tokens, weaken file permissions, commit state files, or describe machine-derived encryption as protection from an attacker with access to the same account and machine.
-- The web client uses OAuth scope `atproto transition:generic`, browser session storage, user-selected history files, and production metadata in `web/static/client-metadata.json`. Keep redirect URIs, client ID, scopes, and deployment origin in sync. Do not add server secrets to browser code.
-- Treat the lexicons as published compatibility contracts. Coordinate schema changes with readers, writers, generated types, tests, and the maintained monorepo; do not fork the protocol accidentally in this archived copy.
+## Repository layout
 
-## Working and validation
+```
+include/zincfox/       public/internal C/C++ interfaces
+src/protocol/          VarInt, framing, packet/state codecs
+src/server/            connection lifecycle and dispatch
+src/world/             world/chunk state (future)
+src/entity/            entity/player storage (future)
+src/storage/           region/persistence backends (future)
+test/                  unit and protocol regression tests
+docs/                  design notes and compatibility records
+```
 
-- The workspace is pnpm-based (`pnpm-lock.yaml`, `pnpm-workspace.yaml`), although some root scripts deliberately invoke npm internally. Do not replace those commands or update the separate `web/pnpm-lock.yaml` incidentally.
-- For a sanctioned root change run `pnpm run type-check`, `pnpm test`, and `pnpm run build:all`. Exercise `pnpm run dry-run` only with disposable/non-production credentials and confirm it performs no create or delete.
-- For web-only work, run `pnpm --dir web check`, `pnpm --dir web lint`, and `pnpm --dir web build`; manually test OAuth callback/restoration, Last.fm and Spotify inputs, cancellation, CAR failure, rate limiting, deduplicate dry-run, and partial writes.
-- Do not commit `.env`, credentials, import state, listening-history exports, OAuth tokens, `dist/`, SvelteKit/Vercel output, or logs. Preserve the repository's archived notices and AGPL licensing.
+Dependency direction is inward from higher-level game/server code to small
+protocol/net abstractions. Do not let world/entity code call raw socket APIs.
+
+## Module boundaries — read before editing
+
+- **Protocol code owns all wire-format parsing.** `src/protocol/` must stay
+  free of server lifecycle concerns;
+`src / server /` must stay free of game -
+        state concerns
+            .The boundary is the `protocol::handle_packet` dispatch interface.-
+        **Version -
+        specific packet definitions stay in `src /
+            protocol /`.**Transport and game systems must not accumulate packet
+                              IDs or
+    version checks.Put version tables /
+            codecs behind the protocol layer so supporting another Minecraft
+                release does not fork the whole server.-
+        **Connection state is owned by `src /
+            server /`.**The protocol layer sees only
+                            borrowed `std::span` payloads; it must not retain decoded packet objects
+  after dispatch.
+- **No global mutable server state.** A subsystem that owns a thread must
+  expose shutdown/join semantics and memory/queue bounds.
+
+## Build and run
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+cmake --build build -j
+ctest --test-dir build --output-on-failure
+./build/zincfox [--port 1-65535]
+```
+
+"Verified" means: clean build (zero warnings under the strict flags), `ctest`
+green, and — for anything touching the network path — a real client connection
+path for the claimed states with automated regression fixtures retained where
+licensing permits.
+
+## Configuration
+
+- **All configurable behavior belongs in the global `zincfox.conf` file.** Do
+  not add hidden environment flags, command-only switches, or per-module
+  configuration files for server behavior. A new setting must have a bounded
+  type/range, a documented default, load/save coverage, and an explanation of
+  its retained-memory or resource effect when relevant.
+- Configuration must never make an unbounded queue, cache, world, or player
+  store possible. Dynamic choices must resolve to one of documented finite
+  limits and select the safe lower limit when host information is unavailable.
+
+## Versioning
+
+- Releases use strict semantic versioning `v<major>.<minor>.<patch>`.
+- The version lives only in the `VERSION` line of `CMakeLists.txt`; derive any
+  runtime version string from that single source of truth, not a separate file.
+- **No version jumps**: bump from the immediately previous released version.
+  Never skip a patch, minor, or major number; do not backfill gaps with phantom
+  tags or releases.
+- **Substantial changes require a release cut**: a user-visible protocol or
+  gameplay behavior, persistence/world-format change, compatibility claim,
+  public interface change, or material resource-budget change must not be
+  allowed to accumulate indefinitely after a release. Before merging the next
+  substantial tranche, audit the commits since the latest tag and cut the next
+  sequential version when the tranche is ready. Documentation-only, test-only,
+  formatting, and internal refactors do not require a version cut unless they
+  change the published contract.
+- **Release procedure follows Wolfram**: change the single `VERSION` line,
+  create a signed annotated `v<major>.<minor>.<patch>` tag on that same commit
+  (falling back to an annotated tag only when signing is unavailable), push the
+  commit and tag, and create the matching GitHub release with generated notes.
+  For pre-1.0 releases, publish source only; attach built artifacts starting at
+  `v1.0.0`.
+
+## Code style
+
+- Header guards (`ZINCFOX_PROTOCOL_<FILE>_HPP`), not `#pragma once` — matches
+  the convention in `wolfram/include/wolfram/` and `clay/include/clay/`.
+- `.clang-format` in this repo (LLVM base, 4-space indent, 80 columns,
+  attached braces) — run `clang-format -i` on changed files.
+- Comments explain *why*, sparingly; never narrate obvious code.
+- No C++ exceptions for expected protocol/server states. Use explicit
+  result/error types. Reserve exceptions/aborts for genuine programmer errors.
+- Avoid RTTI-heavy or virtual object hierarchies for packets/entities when
+  tagged values or tables are simpler.
+
+## Memory invariants
+
+The initial scaffold deliberately chooses simple fixed bounds:
+
+- 32 connection slots;
+- one 8 KiB receive buffer per slot;
+- one 128 KiB transmit buffer per slot (sized for one columnar 24-section
+  chunk frame with full sky light);
+- one small protocol / session record per slot;
+- one `pollfd` table for the listener plus those slots.
+
+The fixed socket-buffer payload is therefore **4.25 MiB** at maximum connection
+capacity (32 slots x 136 KiB), plus small connection/poller metadata and
+operating-system socket buffers. This is not a promise that the process RSS is
+4.25 MiB, but it is the first explicit retained-memory budget owned by Zincfox
+itself.
+
+When adding a subsystem, document its steady-state and worst-case retained
+memory in the PR when practical.
+
+Every long-lived subsystem should answer four questions:
+
+1. What owns this memory?
+2. What is the normal retained size?
+3. What is the maximum retained size or eviction/backpressure rule?
+4. What input can cause the subsystem to grow?
+
+## Commits and pull requests
+
+Matches the convention in `wolfram/AGENTS.md` / `keepsake/AGENTS.md`.
+
+- **Atomic conventional commits**: every commit is exactly one logical change.
+  Scope by module — `feat(protocol)`, `feat(server)`, `fix(net)`,
+  `test(protocol)`, etc. Never combine a code change with a docs update, or
+  changes to two unrelated modules, in one commit. Write the message to explain
+  the reasoning, not just restate the file list. Split multi-concern work into
+  sequential commits instead.
+- **Metadata files may be updated directly on `main`.** This covers project-level
+  metadata and documentation such as `AGENTS.md`, `README.md`, `docs/**`, and
+  similar non-code files that guide how the repository is maintained.
+- **All other work lands via feature branches and pull requests.** Code,
+  tests, build scripts, and any behavioral change must be developed on a
+  dedicated `feat/<area>` or `fix/<area>` branch and merged through a PR so
+  review and CI run before it reaches `main`.
+- **Honest attribution**: commits may carry a `Co-authored-by:` trailer crediting
+  an AI agent, and may reference the specific model used, in the commit message,
+  a PR, or code comments — attribution should reflect who/what actually did the
+  work.
+- **No commented-out code** left in place; delete dead code or move it to a
+  test.
+
+## Issue tracking
+
+- **Track every discovered issue**: a bug, protocol mismatch, portability
+  defect, missing test, documentation inconsistency, or deferred compatibility
+  problem found during development or review must have a GitHub issue unless it
+  is fixed in the same atomic change and leaves no follow-up work.
+- Create issues with the repository templates under
+  `.github/ISSUE_TEMPLATE/` (`bug_report.yml` for defects and
+  `feature_request.yml` for requested behavior). Include the exact version or
+  commit, reproduction or evidence, affected protocol state, and relevant
+  test/CI output. Do not substitute private notes or an untracked TODO for a
+  reportable issue.
+- Link the issue from the implementing pull request and close it only when the
+  fix or explicitly scoped follow-up has been verified. Release audits must
+  review open issues before declaring a tranche complete.
+
+## Do not do these without explicit human sign-off
+
+- Add a JVM/Paper/Spigot server as the actual backend.
+- Copy Mojang proprietary server source or decompiled implementation code.
+- Add an unbounded network/task/chunk queue.
+- Replace protocol validation with permissive "best effort" parsing.
+- Introduce a dependency-heavy game/server framework.
+- Claim vanilla compatibility for a release without client/protocol tests.
+- Weaken warnings, sanitizers or tests merely to get CI green.
